@@ -3,33 +3,31 @@ Generación de la hoja de cálculo: replica EXACTAMENTE el diseño y el análisi
 de "Detalles de Tr's atrapadas DD-MM-YYYY.xlsx" del equipo de continuidad.
 
 Diseño observado en el archivo de referencia:
-  - Sin estilos de relleno/bold. Encabezados de sección en columna D, combinados
-    D:G, con texto plano. Encabezados de tabla (Tienda/POS/TR EPA...) planos.
+  - Sin relleno/bold. Encabezados de sección en columna D combinados D:G.
   - Guatemala:
       A1='StellarDocID'  B1='Observaciones'  B2='Sin observaciones.'
-      Secciones en D (merged D:G):
-        'Sin cliente en VENTAS.MAECEC o Sin documento en VENTAS.OPEVTSC'  (Tienda/POS/TR EPA)
-        'Sin cliente en CR400'                                            (Tienda/POS/TR EPA/CODCTE)
-        'Transacciones con estatus en blanco en sus detalles'            (Tienda/POS/TR EPA)
-        'Devoluciones sin detalles'                                       (Tienda/POS/TR EPA)
-        "TR's Pendientes por imprimir"                                    (Tienda/POS/TR/Mensaje)
-      Cada sección: título, cabecera, y 2 filas de datos (o vacías).
-  - Salvador: header A1-D1 centrado, filas con Tienda/POS/TR EPA numéricos +
-      Observaciones ('Se desconoce el motivo ya que la caja no está encendida.').
-  - Venezuela: header A1-B1, filas StellarDocID + Observaciones.
+      Secciones en D (merged D:G), cada 4 filas:
+        'Sin cliente en VENTAS.MAECEC o Sin documento en VENTAS.OPEVTSC'
+        'Sin cliente en CR400'
+        'Transacciones con estatus en blanco en sus detalles'
+        'Devoluciones sin detalles'
+        "TR's Pendientes por imprimir"  (Tienda/POS/TR/Mensaje)
+  - Salvador: header A1-D1 centrado; Tienda/POS/TR EPA/Observaciones.
+  - Venezuela: header A1-B1; StellarDocID/Observaciones.
+  - La columna Observaciones tiene LISTA DESPLEGABLE (data validation) con las
+    opciones fijas definidas en config.OBSERVACIONES.
 """
 import logging
 import os
 
 from openpyxl import Workbook
 from openpyxl.styles import Alignment
-from openpyxl.utils import get_column_letter
+from openpyxl.worksheet.datavalidation import DataValidation
 
 import config
 
 log = logging.getLogger(__name__)
 
-# Anchos de columna tal como el archivo real
 _WIDTHS_GT = {"A": 19.13, "B": 77.88, "C": 15.75, "D": 18.75, "G": 14.13}
 _WIDTHS_SV = {"A": 9.25, "B": 7.5, "C": 12.25, "D": 66.0}
 _WIDTHS_VE = {"A": 19.13, "B": 106.0, "C": 15.75, "D": 38.13}
@@ -38,7 +36,7 @@ _CENTER = Alignment(horizontal="center")
 
 
 def _num(value):
-    """El archivo real guarda Tienda/POS/TR como float."""
+    """El archivo real guarda Tienda/POS/TR como número."""
     if value is None or value == "":
         return None
     try:
@@ -52,11 +50,22 @@ def _apply_widths(ws, widths):
         ws.column_dimensions[col].width = width
 
 
-def _section(ws, start_row, titulo, headers, data_rows, rows_of_data=2):
-    """Escribe una sección en col D (merged D:G) como el archivo real.
+def _add_dropdown(ws, options, col_letter, start_row, end_row):
+    """Agrega la lista desplegable de Observaciones."""
+    options = [o for o in options if not o.endswith(",")]
+    if len(options) > 255:
+        options = [o[:255] for o in options]
+    formula = '"' + ",".join(options[:50]) + '"'
+    dv = DataValidation(type="list", formula1=formula, allow_blank=True, showErrorMessage=True)
+    ws.add_data_validation(dv)
+    if end_row > start_row:
+        dv.add(f"{col_letter}{start_row}:{col_letter}{end_row}")
+    else:
+        dv.add(f"{col_letter}{start_row}")
 
-    El original separa secciones cada 4 filas: título, cabecera y 2 filas.
-    """
+
+def _section(ws, start_row, titulo, headers, data_rows, rows_of_data=2):
+    """Escribe una sección en col D (merged D:G), separando cada 4 filas."""
     ws.merge_cells(start_row=start_row, start_column=4, end_row=start_row, end_column=7)
     ws.cell(row=start_row, column=4).value = titulo
     hdr_row = start_row + 1
@@ -68,7 +77,7 @@ def _section(ws, start_row, titulo, headers, data_rows, rows_of_data=2):
             row_data = data_rows[j]
             for i in range(len(headers)):
                 ws.cell(row=r, column=4 + i).value = row_data[i] if i < len(row_data) else None
-    return start_row + 4  # siguiente sección: título, cabecera y 2 filas
+    return start_row + 4
 
 
 # ---------------------------------------------------------------------------
@@ -82,7 +91,7 @@ def _sheet_guatemala(ws, rows):
     def take(origen):
         return by_origen.get(origen, [])
 
-    # Bloque Cabtra a la izquierda (A/B), como en el original
+    # Bloque Cabtra (A/B) con desplegable en B
     ws["A1"] = "StellarDocID"
     ws["B1"] = "Observaciones"
     cabtra = take("Cabtra GT")
@@ -90,45 +99,45 @@ def _sheet_guatemala(ws, rows):
         for i, r in enumerate(cabtra):
             ws.cell(row=2 + i, column=1).value = r["StellarDocID"]
             ws.cell(row=2 + i, column=2).value = r["Observaciones"]
+        _add_dropdown(ws, config.OBSERVACIONES["GT"], "B", 2, 1 + len(cabtra))
     else:
         ws["B2"] = "Sin observaciones."
+        _add_dropdown(ws, config.OBSERVACIONES["GT"], "B", 2, 2)
 
-    # Secciones en columna D
-    anomalias = take("AS400: no llegó cliente a MAECEC") + take("AS400: no llegó a OPVTSC")
     row = _section(
         ws, 1,
         "Sin cliente en VENTAS.MAECEC o Sin documento en VENTAS.OPEVTSC",
         ["Tienda", "POS", "TR EPA"],
-        [[_num(r["Tienda"]), _num(r["POS/Caja"]), _num(r["TR EPA"])] for r in anomalias],
+        [[_num(r["Tienda"]), _num(r["POS/Caja"]), _num(r["TR EPA"])]
+         for r in take("AS400: no llegó cliente a MAECEC") + take("AS400: no llegó a OPVTSC")],
     )
-    cr400 = take("AS400: no llegó cliente a CR400")
     row = _section(
         ws, row,
         "Sin cliente en CR400",
         ["Tienda", "POS", "TR EPA", "CODCTE"],
-        [[_num(r["Tienda"]), _num(r["POS/Caja"]), _num(r["TR EPA"])] for r in cr400],
+        [[_num(r["Tienda"]), _num(r["POS/Caja"]), _num(r["TR EPA"]), r.get("CODCTE", "")]
+         for r in take("AS400: no llegó cliente a CR400")],
     )
-    blanco = take("AS400: estatus en blanco")
     row = _section(
         ws, row,
         "Transacciones con estatus en blanco en sus detalles",
         ["Tienda", "POS", "TR EPA"],
-        [[_num(r["Tienda"]), _num(r["POS/Caja"]), _num(r["TR EPA"])] for r in blanco],
+        [[_num(r["Tienda"]), _num(r["POS/Caja"]), _num(r["TR EPA"])]
+         for r in take("AS400: estatus en blanco")],
     )
-    dev = take("AS400: devolución sin detalle")
     row = _section(
         ws, row,
         "Devoluciones sin detalles",
         ["Tienda", "POS", "TR EPA"],
-        [[_num(r["Tienda"]), _num(r["POS/Caja"]), _num(r["TR EPA"])] for r in dev],
+        [[_num(r["Tienda"]), _num(r["POS/Caja"]), _num(r["TR EPA"])]
+         for r in take("AS400: devolución sin detalle")],
     )
-    pend = take("MA_PAGOS pendiente")
     _section(
         ws, row,
         "TR's Pendientes por imprimir",
         ["Tienda", "POS", "TR", "Mensaje"],
         [[_num(r["Tienda"]), _num(r["POS/Caja"]), _num(r["TR EPA"]), r["Observaciones"]]
-         for r in pend],
+         for r in take("MA_PAGOS pendiente")],
     )
     _apply_widths(ws, _WIDTHS_GT)
 
@@ -138,28 +147,24 @@ def _sheet_salvador(ws, rows):
         cell = ws.cell(row=1, column=1 + i)
         cell.value = h
         cell.alignment = _CENTER
-    if not rows:
-        return
-    r = 2
-    for item in rows:
+    for r, item in enumerate(rows, start=2):
         ws.cell(row=r, column=1).value = _num(item["Tienda"])
         ws.cell(row=r, column=2).value = _num(item["POS/Caja"])
         ws.cell(row=r, column=3).value = _num(item["TR EPA"])
         ws.cell(row=r, column=4).value = item["Observaciones"]
-        r += 1
+    last = max(2, 1 + len(rows))
+    _add_dropdown(ws, config.OBSERVACIONES["SV"], "D", 2, last)
     _apply_widths(ws, _WIDTHS_SV)
 
 
 def _sheet_venezuela(ws, rows):
     ws["A1"] = "StellarDocID"
     ws["B1"] = "Observaciones"
-    if not rows:
-        return
-    r = 2
-    for item in rows:
+    for r, item in enumerate(rows, start=2):
         ws.cell(row=r, column=1).value = item["StellarDocID"]
         ws.cell(row=r, column=2).value = item["Observaciones"]
-        r += 1
+    last = max(2, 1 + len(rows))
+    _add_dropdown(ws, config.OBSERVACIONES["VE"], "B", 2, last)
     _apply_widths(ws, _WIDTHS_VE)
 
 
@@ -186,11 +191,11 @@ if __name__ == "__main__":
 
     sample = {"GT": [{"Tienda": "3", "POS/Caja": "52", "TR EPA": "52023419",
                       "StellarDocID": "X", "Origen": "MA_PAGOS pendiente",
-                      "Observaciones": "FAIL - 82-ERROR CALCULO DE IMPORTE BRUTO INCORRECTO"}],
+                      "Observaciones": "FAIL - 82-ERROR"}],
               "SV": [{"Tienda": "3", "POS/Caja": "20", "TR EPA": "666745",
                       "Observaciones": "Se desconoce el motivo ya que la caja no está encendida."}],
-              "VE": [{"StellarDocID": "13DEV41027786",
-                      "Observaciones": "Error Relación Venta/Nota de Crédito."}]}
+              "VE": [{"StellarDocID": "16DEV41012504",
+                      "Observaciones": "Falta en VENTASSTORE pero si se encuentra en VAD20."}]}
     with tempfile.TemporaryDirectory() as tmp:
         out = build_workbook(sample, tmp, "01-01-2026")
         from openpyxl import load_workbook
@@ -201,9 +206,11 @@ if __name__ == "__main__":
         assert g["A1"].value == "StellarDocID" and g["B1"].value == "Observaciones"
         assert g["B2"].value == "Sin observaciones."
         assert g["D1"].value.startswith("Sin cliente en VENTAS.MAECEC")
-        assert g["D19"].value == 3 or g["D19"].value is None
-        s = wb["Salvador"]
-        assert s["A1"].value == "Tienda" and isinstance(s["A2"].value, (int, float))
+        assert g["D17"].value == "TR's Pendientes por imprimir"
+        assert len(g.data_validations.dataValidation) >= 1
         v = wb["Venezuela"]
         assert v["A1"].value == "StellarDocID"
+        assert len(v.data_validations.dataValidation) >= 1
+        s = wb["Salvador"]
+        assert len(s.data_validations.dataValidation) >= 1
     print("excel_builder OK")

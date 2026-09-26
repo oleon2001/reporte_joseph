@@ -207,3 +207,44 @@ EXCEL_COLUMNS = ["Tienda", "POS/Caja", "TR EPA", "StellarDocID", "Origen", "Obse
 
 # Orden de pestañas en la hoja de cálculo
 SHEET_ORDER = ["GT", "SV", "VE"]
+
+# Listas desplegables de Observaciones (idénticas al Excel real del equipo).
+OBSERVACIONES_GT = [
+    "Falta de Donación por falta de Detalle Donación en el momento de su envío.",
+    "Artículos con descuentos repetidos en el detalle.",
+    "Falta en VENTASSTORE pero si se encuentra en VAD20.",
+    "Sin observaciones.",
+    "El campo CUSTOMERID posee un valor no permitido.",
+    "Existen códigos artículos que no tienen los 7 dígitos que les corresponden.",
+    "Existen artículos que tienen codigo o porcentaje de descuento pero no guardaron rebaja.",
+]
+OBSERVACIONES_SV = [
+    "Venta con diferencias en montos.",
+    "Anulación no sube ya que su venta asociada no tiene campos asignados en caja.",
+    "Se desconoce el motivo ya que la caja no está encendida.",
+    "Devolución con diferencias en montos.",
+    "Venta no tiene campos asignados en caja.",
+    "Venta en estado I.",
+    "Devolución en estado I.",
+    "Anulación en estado I.",
+]
+OBSERVACIONES_VE = [
+    "Falta de Donación por falta de Detalle Donación en el momento de su envío.",
+    "Artículos con descuentos repetidos en el detalle.",
+    "Falta en VENTASSTORE pero si se encuentra en VAD20.",
+    "Sin observaciones.",
+    "El campo CASHIER posee un valor no permitido.",
+    "El campo CUSTOMERID posee un valor no permitido.",
+    "Error Descuento Detalle - Existen artículos que tienen código o porcentaje de descuento pero no guardaron rebaja.",
+    "Error Cálculo Detalle - Total Artículo Incorrecto.",
+    "Error Cálculo Cabecera Detalle - Rebaja Incorrecta.",
+    "Error Relación Venta/Nota de Crédito.",
+]
+
+# Columnas de la hoja (celda donde vive el desplegable por país)
+DROPDOWN = {
+    "GT": {"col": 1, "start_row": 2},   # B2
+    "SV": {"col": 3, "start_row": 2},   # D2
+    "VE": {"col": 1, "start_row": 2},   # B2
+}
+OBSERVACIONES = {"GT": OBSERVACIONES_GT, "SV": OBSERVACIONES_SV, "VE": OBSERVACIONES_VE}

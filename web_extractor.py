@@ -24,6 +24,7 @@ class WebResult:
         self.report_pdf = None
         self.monitor_pdf = None
         self.report_total = 0
+        self.report_rows = []
         self.monitor_total = 0
         self.monitor_rows = []
         self.error = ""
@@ -52,14 +53,66 @@ def _all_text(page):
     return "\n".join(chunks)
 
 
-def _param_frame(page):
+def _param_frame(page, timeout=30000):
+    """Espera a que el frame de parámetros del Reporte Web esté visible."""
+    deadline = datetime.datetime.now() + datetime.timedelta(milliseconds=timeout)
+    while datetime.datetime.now() < deadline:
+        for frame in page.frames:
+            try:
+                loc = frame.locator(config.SELECTORS["report_server"])
+                if loc.count() and loc.first.is_visible():
+                    return frame
+            except Exception:  # noqa: BLE001
+                continue
+        page.wait_for_timeout(1000)
+    raise RuntimeError("No se encontró el frame de parámetros del Reporte Web")
+
+
+def _extract_report_rows(page):
+    """Extrae las filas de la tabla de resultados del Reporte Web.
+
+    Columnas reales: Tienda | Caja | Transacción Inicial | Transacción Final |
+    Cantidad Trx | Transacciones Faltantes. La TR EPA es "Transacción Inicial".
+    """
+    rows = []
     for frame in page.frames:
         try:
-            if frame.locator(config.SELECTORS["report_server"]).count():
-                return frame
+            tables = frame.locator("table")
+            for t in range(tables.count()):
+                table = tables.nth(t)
+                trs = table.locator("tr").all()
+                header_idx = None
+                for i, tr in enumerate(trs):
+                    cells = [c.inner_text().strip() for c in tr.locator("td,th").all()]
+                    joined = " ".join(cells)
+                    if "Tienda" in joined and "Caja" in joined and "Transacci" in joined:
+                        header_idx = i
+                        break
+                if header_idx is None:
+                    continue
+                for tr in trs[header_idx + 1:]:
+                    cells = [c.inner_text().strip() for c in tr.locator("td").all()]
+                    nums = [c for c in cells if re.fullmatch(r"\d{1,9}", c)]
+                    if len(nums) < 3:
+                        continue
+                    tienda, caja, tr_epa = nums[0], nums[1], nums[2]
+                    # Filtro de sanidad: tienda<=99, caja<=99, TR EPA 4-7 dígitos.
+                    if len(tienda) > 3 or len(caja) > 3 or not (3 <= len(tr_epa) <= 8):
+                        continue
+                    # Descartar la fila de fecha (Día=25, Mes=9, Año=2026).
+                    if re.fullmatch(r"20\d{2}", tr_epa) and len(caja) <= 2 and len(tienda) <= 2:
+                        continue
+                    rows.append({"Tienda": tienda, "POS/Caja": caja, "TR EPA": tr_epa})
         except Exception:  # noqa: BLE001
             continue
-    raise RuntimeError("No se encontró el frame de parámetros del Reporte Web")
+    # Deduplicar manteniendo orden
+    seen, unique = set(), []
+    for r in rows:
+        key = (r["Tienda"], r["POS/Caja"], r["TR EPA"])
+        if key not in seen:
+            seen.add(key)
+            unique.append(r)
+    return unique
 
 
 def _dump_inspect(page, name, out_dir):
@@ -89,13 +142,14 @@ def _extract_report(context, page, country, result, days_back, out_dir, inspect)
     frame.fill(sel["report_date_from"], from_date.strftime(config.REPORT_DATE_FORMAT))
     frame.fill(sel["report_date_to"], today.strftime(config.REPORT_DATE_FORMAT))
     frame.locator(sel["report_ok"]).first.click(timeout=10000)
-    page.wait_for_timeout(9000)
+    page.wait_for_timeout(10000)
 
     if inspect:
         _dump_inspect(page, f"report_{country}", out_dir)
 
     match = re.search(sel["report_metric_re"], _all_text(page), re.IGNORECASE)
     result.report_total = _to_int(match.group(1)) if match else 0
+    result.report_rows = _extract_report_rows(page)
 
     # Exportar a PDF (diálogo "Export report" -> formato PDF -> OK -> descarga).
     path = os.path.join(out_dir, f"Reporte Web {meta['name']}.pdf")

@@ -203,7 +203,8 @@ def main():
 
     # 2) Validación en BD
     log.info("Validando BD%s...", " (mock)" if args.mock else "")
-    db_results = db_validator.validate_all(args.days_back, mock=args.mock)
+    sv_web = web["SV"].report_rows if web.get("SV") else []
+    db_results = db_validator.validate_all(args.days_back, mock=args.mock, sv_web_rows=sv_web)
 
     attachments = []
     if args.merge:

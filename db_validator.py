@@ -98,23 +98,58 @@ def _clean_obs(text):
     return re.sub(r"\s+", " ", str(text or "")).strip()
 
 
-def normalize(row, origen, obs=""):
+# Mapea el diagnóstico crudo del Cabtra al valor del desplegable del Excel.
+# La documentación indica que las Observaciones son opciones fijas y que un
+# caso nuevo se agrega a la lista. Mientras tanto se mapea a la más cercana.
+_OBS_KEYS = {
+    "Falta de Donación": "Falta de Donación por falta de Detalle Donación en el momento de su envío.",
+    "Donacion": "Falta de Donación por falta de Detalle Donación en el momento de su envío.",
+    "descuentos repetidos": "Artículos con descuentos repetidos en el detalle.",
+    "VAD20": "Falta en VENTASSTORE pero si se encuentra en VAD20.",
+    "CASHIER": "El campo CASHIER posee un valor no permitido.",
+    "CUSTOMERID": "El campo CUSTOMERID posee un valor no permitido.",
+    "porcentaje de descuento pero no guardaron rebaja":
+        "Error Descuento Detalle - Existen artículos que tienen código o porcentaje de descuento pero no guardaron rebaja.",
+    "Total Artículo Incorrecto": "Error Cálculo Detalle - Total Artículo Incorrecto.",
+    "Rebaja Incorrecta": "Error Cálculo Cabecera Detalle - Rebaja Incorrecta.",
+    "Venta/Nota de Crédito": "Error Relación Venta/Nota de Crédito.",
+    "7 dígitos": "Existen códigos artículos que no tienen los 7 dígitos que les corresponden.",
+    "codigo o porcentaje": "Existen artículos que tienen codigo o porcentaje de descuento pero no guardaron rebaja.",
+    "No paso validaciones del extractor": "Sin observaciones.",
+    "No paso validaciones del procesador": "Sin observaciones.",
+}
+
+
+def map_observacion(text, country):
+    """Devuelve una observación válida del desplegable para el país dado."""
+    clean = _clean_obs(text)
+    options = config.OBSERVACIONES.get(country, [])
+    # Coincidencia exacta
+    for opt in options:
+        if clean == opt or clean == opt.rstrip("."):
+            return opt
+    # Coincidencia por palabras clave
+    if clean:
+        for key, mapped in _OBS_KEYS.items():
+            if key.lower() in clean.lower():
+                return mapped
+    return "Sin observaciones."
+
+
+def normalize(row, origen, obs="", country=None):
     """Normaliza una fila cruda a las columnas de la hoja de cálculo."""
-    observacion = obs or _clean_obs(_pick(row, "Observaciones", "Motivo", "c_MotivoContingencia"))
-    if not observacion:
-        # Cabtra: si no hay diagnóstico de error, se usa el contexto disponible.
-        partes = [
-            _clean_obs(_pick(row, "ORIGEN_DEVOLUCION")),
-            _clean_obs(_pick(row, "Marca_Integracion")),
-        ]
-        observacion = " | ".join(p for p in partes if p and p not in (" ", "Pendiente"))
+    raw_obs = obs or _pick(row, "Observaciones", "Motivo", "c_MotivoContingencia")
+    if country:
+        observar = map_observacion(raw_obs, country)
+    else:
+        observar = _clean_obs(raw_obs)
     return {
         "Tienda": _pick(row, "Tienda", "STORE", "TDACMV", "c_Sucursal", "NUMTIENDA"),
         "POS/Caja": _pick(row, "Caja", "POS/Caja", "CAJCMV", "c_Caja", "CAJA", "NUMCAJA"),
         "TR EPA": _pick(row, "TR_EPA", "TR EPA", "TRSCMV", "c_Numero", "DOCUMENTUID"),
         "StellarDocID": _pick(row, "StellarDocID", "DocumentUID", "DOCUMENTUID"),
         "Origen": origen,
-        "Observaciones": observacion,
+        "Observaciones": observar,
     }
 
 
@@ -161,7 +196,7 @@ def _run(name, country, fn):
     return result
 
 
-def _central_stellar_query(cfg, sql_file, days_back, origen, database="VENTASSTORE"):
+def _central_stellar_query(cfg, sql_file, days_back, origen, database="VENTASSTORE", country=None):
     sql = read_sql(sql_file)
     if not sql:
         raise RuntimeError(f"SQL no configurado: {sql_file}")
@@ -172,7 +207,7 @@ def _central_stellar_query(cfg, sql_file, days_back, origen, database="VENTASSTO
         rows = _fetch(conn, sql, [from_date, to_date])
     finally:
         conn.close()
-    return [normalize(r, origen) for r in rows]
+    return [normalize(r, origen, country=country) for r in rows]
 
 
 def _ma_pagos_stores(stores, days_back, origen):
@@ -192,7 +227,7 @@ def _ma_pagos_stores(stores, days_back, origen):
                 conn.close()
             ok_stores += 1
             for r in rows:
-                row = normalize(r, f"{origen} tienda {store_id}")
+                row = normalize(r, f"{origen} tienda {store_id}", country="GT")
                 if not row["Tienda"]:
                     row["Tienda"] = store_id
                 collected.append(row)
@@ -225,7 +260,7 @@ def _as400_anomalies(cfg, days_back):
                 continue
             try:
                 rows = _fetch(conn, sql, [days])
-                collected += [normalize(r, origen) for r in rows]
+                collected += [normalize(r, origen, country="GT") for r in rows]
             except Exception as exc:  # noqa: BLE001
                 errors.append(f"{filename}:{str(exc)[:60]}")
     finally:
@@ -242,75 +277,53 @@ def validate_ve(days_back):
     return [
         _run("Reporte/Cabtra VE", "VE",
              lambda: _central_stellar_query(config.CENTRAL_STELLAR_VE, "Cabtra VE.sql",
-                                            days_back, "Cabtra VE")),
+                                            days_back, "Cabtra VE", country="VE")),
         _run("Falta en VENTASSTORE/VAD20", "VE",
              lambda: _central_stellar_query(config.CENTRAL_STELLAR_VE, "VentaStore-VAD20.sql",
-                                            days_back, "VentaStore/VAD20")),
+                                            days_back, "VentaStore/VAD20", country="VE")),
     ]
 
 
-def _sv_itr(days_back):
-    """ITR de SV (AS400 Central SV): transacciones atrapadas vía CR400."""
-    sql = read_sql("itr.sql")
-    if not sql:
-        raise RuntimeError("SQL no configurado: itr.sql")
-    from_date, to_date = date_range(days_back)
-    # DB2 exige DATE(...) en el BETWEEN date(A.FECHA); se usan literales.
-    sql = sql.replace(":FechaInicial", f"DATE('{from_date}')")
-    sql = sql.replace(":FechaFinal", f"DATE('{to_date}')")
-    conn = connect_db2(config.AS400_SV_CENTRAL)
-    try:
-        rows = _fetch(conn, sql)
-    finally:
-        conn.close()
-    return [_sv_normalize(r) for r in rows]
+def validate_sv(days_back, web_rows=None):
+    """SV: las TR se detectan en el Reporte Web y se les añade la condición.
 
-
-def _sv_normalize(row):
-    """Parsea "TIENDA: 003 CAJA: 26 TR: 964762" a las columnas de la hoja."""
-    import re
-
-    datos = str(_pick(row, "DATOS_DE_LA_TRANSACCION"))
-    tienda = caja = tr = ""
-    m = re.search(r"TIENDA:\s*(\S+)", datos)
-    if m:
-        tienda = m.group(1)
-    m = re.search(r"CAJA:\s*(\S+)", datos)
-    if m:
-        caja = m.group(1)
-    m = re.search(r"TR:\s*(\S+)", datos)
-    if m:
-        tr = m.group(1)
-    obs = " | ".join(
-        s for s in (
-            _clean_obs(_pick(row, "ANALISTA_MOV_TR")),
-            _clean_obs(_pick(row, "PIN_EMERGENCIA_TR")),
-        ) if s
-    )
-    return {
-        "Tienda": tienda,
-        "POS/Caja": caja,
-        "TR EPA": tr,
-        "StellarDocID": _pick(row, "ID_TRANSACCION"),
-        "Origen": "ITR SV",
-        "Observaciones": obs,
-    }
-
-
-def validate_sv(days_back):
+    La documentación indica que para SV se toma la TR vista en el Reporte Web
+    (tienda, caja, número de TR) y se agrega la condición que presenta. Las
+    condiciones válidas viven en config.OBSERVACIONES["SV"].
+    """
     return [
-        _run("ITR SV", "SV", lambda: _sv_itr(days_back)),
+        _run("Reporte Web SV", "SV", lambda: _sv_from_web(web_rows)),
     ]
+
+
+# Condiciones del desplegable SV que son "reales" (atrapadas); las demás son
+# motivos de que la caja no esté encendida o no tenga datos.
+_SV_OBS_DEFAULT = "Se desconoce el motivo ya que la caja no está encendida."
+
+
+def _sv_from_web(web_rows):
+    """Normaliza las TR detectadas en el Reporte Web de SV."""
+    filas = []
+    for row in web_rows or []:
+        filas.append({
+            "Tienda": row.get("Tienda", ""),
+            "POS/Caja": row.get("POS/Caja") or row.get("Caja", ""),
+            "TR EPA": row.get("TR EPA") or row.get("TR_EPA", ""),
+            "StellarDocID": "",
+            "Origen": "Reporte Web SV",
+            "Observaciones": row.get("Observaciones") or _SV_OBS_DEFAULT,
+        })
+    return filas
 
 
 def validate_gt(days_back):
     return [
         _run("Reporte/Cabtra GT", "GT",
              lambda: _central_stellar_query(config.CENTRAL_STELLAR_GT, "Cabtra GT.sql",
-                                            days_back, "Cabtra GT")),
+                                            days_back, "Cabtra GT", country="GT")),
         _run("Falta en VENTASSTORE/VAD20", "GT",
              lambda: _central_stellar_query(config.CENTRAL_STELLAR_GT, "VentaStore-VAD20.sql",
-                                            days_back, "VentaStore/VAD20")),
+                                            days_back, "VentaStore/VAD20", country="GT")),
         _run("Pendientes por imprimir (Stellar)", "GT",
              lambda: _ma_pagos_stores(config.COUNTRIES["GT"]["stellar_stores"], days_back,
                                       "MA_PAGOS pendiente")),
@@ -319,11 +332,19 @@ def validate_gt(days_back):
     ]
 
 
-def validate_all(days_back, mock=False):
-    """Devuelve {pais: [SourceResult, ...]}."""
+def validate_all(days_back, mock=False, sv_web_rows=None):
+    """Devuelve {pais: [SourceResult, ...]}.
+
+    sv_web_rows: TR detectadas en el Reporte Web de SV (tienda/caja/TR), que
+    alimentan la pestaña Salvador según la documentación.
+    """
     if mock:
         return _mock_results()
-    results = {"VE": validate_ve(days_back), "SV": validate_sv(days_back), "GT": validate_gt(days_back)}
+    results = {
+        "VE": validate_ve(days_back),
+        "SV": validate_sv(days_back, sv_web_rows),
+        "GT": validate_gt(days_back),
+    }
     return results
 
 
@@ -343,8 +364,9 @@ def _mock_results():
             src("Falta en VENTASSTORE/VAD20", "VE", []),
         ],
         "SV": [
-            src("Validación SV", "SV", [
-                normalize({"Tienda": "3", "Caja": "21", "TR_EPA": "045812"}, "SV"),
+            src("Reporte Web SV", "SV", [
+                normalize({"Tienda": "3", "Caja": "21", "TR_EPA": "045812"}, "Reporte Web SV",
+                          obs="Se desconoce el motivo ya que la caja no está encendida."),
             ]),
         ],
         "GT": [
