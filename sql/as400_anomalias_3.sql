@@ -1,0 +1,10 @@
+-- Anomalía 3 (GT, AS400 Central): NO LLEGÓ CLIENTE A CR400 (CLIENTE).
+-- Parámetro: ? = días hacia atrás (por defecto 5).
+SELECT c.CODCTE AS Cliente, a.TDACMV AS Tienda, a.CAJCMV AS Caja, a.TRSCMV AS TR_EPA
+FROM ventas.trcmov a
+INNER JOIN ventas.MAECEC c
+  ON (a.TDACMV = c.NUMTIE AND a.CAJCMV = c.CAJA AND a.TRSCMV = c.TRANSA)
+EXCEPTION JOIN cr400.CLIENTE c2
+  ON trim(c2.NUMERO_IDENTIFICACION_CLIENTE) = trim(c.CODCTE)
+WHERE a.FECCMV >= CURRENT_DATE - ? DAY
+  AND a.TDACMV NOT IN (6)

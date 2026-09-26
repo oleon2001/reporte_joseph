@@ -1,0 +1,6 @@
+{
+  "_comentario": "Tiendas apagadas por país. Se omiten del conteo del Monitor y se agregan como observación dinámica. Ej: {\"VE\": [\"12\"], \"SV\": [], \"GT\": []}",
+  "VE": [],
+  "SV": [],
+  "GT": []
+}

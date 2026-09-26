@@ -1,0 +1,271 @@
+"""
+Extracción web (Playwright headless + API) de:
+
+  1. Reporte Web (BIRT) -> 1 PDF por país + métrica "Total Trx no actualizadas".
+  2. Monitor           -> 1 PDF por país (escala 60%) + total de diferencias.
+
+El conteo del Monitor se obtiene de su API REST (robusto, sin scraping); el PDF
+se genera desde la UI con la escala solicitada. Los selectores del Reporte Web
+están calibrados contra el sitio real.
+"""
+import datetime
+import logging
+import os
+import re
+
+import config
+
+log = logging.getLogger(__name__)
+
+
+class WebResult:
+    def __init__(self, country):
+        self.country = country
+        self.report_pdf = None
+        self.monitor_pdf = None
+        self.report_total = 0
+        self.monitor_total = 0
+        self.monitor_rows = []
+        self.error = ""
+
+    def __repr__(self):
+        return (f"<{self.country} web={self.report_total} monitor={self.monitor_total} "
+                f"err={bool(self.error)}>")
+
+
+def _to_int(value):
+    if value is None:
+        return 0
+    if isinstance(value, (int, float)):
+        return int(value)
+    digits = re.sub(r"[^\d]", "", str(value))
+    return int(digits) if digits else 0
+
+
+def _all_text(page):
+    chunks = []
+    for frame in page.frames:
+        try:
+            chunks.append(frame.inner_text("body"))
+        except Exception:  # noqa: BLE001
+            pass
+    return "\n".join(chunks)
+
+
+def _param_frame(page):
+    for frame in page.frames:
+        try:
+            if frame.locator(config.SELECTORS["report_server"]).count():
+                return frame
+        except Exception:  # noqa: BLE001
+            continue
+    raise RuntimeError("No se encontró el frame de parámetros del Reporte Web")
+
+
+def _dump_inspect(page, name, out_dir):
+    try:
+        os.makedirs(out_dir, exist_ok=True)
+        with open(os.path.join(out_dir, f"inspect_{name}.html"), "w", encoding="utf-8") as fh:
+            fh.write(page.content())
+        page.screenshot(path=os.path.join(out_dir, f"inspect_{name}.png"), full_page=True)
+    except Exception as exc:  # noqa: BLE001
+        log.warning("No se pudo volcar inspect %s: %s", name, exc)
+
+
+# ---------------------------------------------------------------------------
+# Reporte Web (BIRT)
+# ---------------------------------------------------------------------------
+def _extract_report(context, page, country, result, days_back, out_dir, inspect):
+    meta = config.COUNTRIES[country]
+    sel = config.SELECTORS
+    today = datetime.date.today()
+    from_date = today - datetime.timedelta(days=days_back)
+
+    page.goto(config.REPORT_WEB_URL, wait_until="domcontentloaded", timeout=60000)
+    page.wait_for_timeout(4000)
+    frame = _param_frame(page)
+
+    frame.select_option(sel["report_server"], config.REPORT_SERVER_VALUES[country])
+    frame.fill(sel["report_date_from"], from_date.strftime(config.REPORT_DATE_FORMAT))
+    frame.fill(sel["report_date_to"], today.strftime(config.REPORT_DATE_FORMAT))
+    frame.locator(sel["report_ok"]).first.click(timeout=10000)
+    page.wait_for_timeout(9000)
+
+    if inspect:
+        _dump_inspect(page, f"report_{country}", out_dir)
+
+    match = re.search(sel["report_metric_re"], _all_text(page), re.IGNORECASE)
+    result.report_total = _to_int(match.group(1)) if match else 0
+
+    # Exportar a PDF (diálogo "Export report" -> formato PDF -> OK -> descarga).
+    path = os.path.join(out_dir, f"Reporte Web {meta['name']}.pdf")
+    frame.locator(sel["report_export"]).click(timeout=10000)
+    page.wait_for_timeout(1500)
+    frame.select_option(sel["report_export_format"], label="PDF")
+    with page.expect_download(timeout=60000) as download_info:
+        frame.locator(sel["report_ok"]).last.click(timeout=10000)
+    download_info.value.save_as(path)
+    result.report_pdf = path
+
+
+# ---------------------------------------------------------------------------
+# Monitor
+# ---------------------------------------------------------------------------
+def _monitor_api(country, from_date, to_date, apagadas):
+    """Conteo del Monitor vía API REST. Devuelve (total_diferencias, filas)."""
+    import requests
+
+    base = config.MONITOR_API_URL
+    cc = country.lower()
+    session = requests.Session()
+    login = session.post(
+        f"{base}/v1/auth/login",
+        json={"username": config.MONITOR_API_USER, "password": config.MONITOR_API_PASS},
+        timeout=20,
+    )
+    login.raise_for_status()
+    token = login.json().get("token")
+    headers = {"Authorization": token}  # el frontend envía el token crudo (sin "Bearer")
+    params = {"startDate": from_date, "endDate": to_date, "page": 1, "limit": 200}
+
+    def counts(path):
+        resp = session.get(f"{base}/v1/transactions/{path}/{cc}", params=params,
+                           headers=headers, timeout=45)
+        resp.raise_for_status()
+        flat = []
+        for item in resp.json().get("results", []):
+            flat += item if isinstance(item, list) else [item]
+        return {str(x.get("store")): _to_int(x.get("count")) for x in flat if x.get("store")}
+
+    stellar = counts("transaction-stellar-front-count")
+    ventas = counts("transaction-ventas-front-count")
+
+    apagadas = set(apagadas or [])
+    rows, total = [], 0
+    for store in sorted(set(stellar) | set(ventas), key=lambda s: int(s) if s.isdigit() else s):
+        if store in apagadas:
+            continue
+        diff = abs(stellar.get(store, 0) - ventas.get(store, 0))
+        total += diff
+        rows.append({"tienda": store, "diff": diff,
+                     "stellar": stellar.get(store, 0), "ventas": ventas.get(store, 0)})
+    return total, rows
+
+
+def _monitor_pdf(page, country, result, out_dir, inspect):
+    meta = config.COUNTRIES[country]
+    sel = config.SELECTORS
+    today = datetime.date.today().strftime(config.MONITOR_DATE_FORMAT)
+
+    page.goto(config.MONITOR_BASE_URL + meta["monitor_path"],
+              wait_until="domcontentloaded", timeout=60000)
+    page.wait_for_timeout(6000)
+
+    dates = page.locator(sel["monitor_date_from"])
+    if dates.count() >= 2:
+        dates.nth(0).fill(today)
+        dates.nth(1).fill(today)
+    if page.locator(sel["monitor_refresh"]).count():
+        page.locator(sel["monitor_refresh"]).first.click()
+        page.wait_for_timeout(5000)
+
+    if meta["has_store_pagination"]:
+        _paginate_down(page, sel["monitor_down"])
+
+    if inspect:
+        _dump_inspect(page, f"monitor_{country}", out_dir)
+
+    path = os.path.join(out_dir, f"Monitor {meta['name']}.pdf")
+    page.pdf(path=path, print_background=True, scale=config.MONITOR_PDF_SCALE)
+    result.monitor_pdf = path
+
+
+def _paginate_down(page, down_selector, max_pages=12):
+    """Pulsa la flecha hacia abajo esperando a que cambie el contenido (best-effort)."""
+    for _ in range(max_pages):
+        if not page.locator(down_selector).count():
+            return
+        before = page.content()
+        try:
+            page.locator(down_selector).last.click(timeout=8000)
+        except Exception:  # noqa: BLE001
+            return
+        page.wait_for_timeout(2000)
+        try:
+            page.wait_for_function("prev => document.body.innerHTML !== prev",
+                                   arg=before, timeout=8000)
+        except Exception:  # noqa: BLE001
+            return
+
+
+# ---------------------------------------------------------------------------
+# API
+# ---------------------------------------------------------------------------
+def extract_all(days_back, out_dir, mock=False, inspect=False, apagadas=None, only=None):
+    countries = list(config.COUNTRIES)
+    if only:
+        countries = [c for c in countries if c in only]
+    results = {c: WebResult(c) for c in countries}
+
+    if mock:
+        _fill_mock(results, out_dir)
+        return results
+
+    from playwright.sync_api import sync_playwright
+
+    today = datetime.date.today()
+    monitor_date = today.isoformat()  # el Monitor solo usa el día actual
+
+    with sync_playwright() as p:
+        browser = p.chromium.launch(headless=True, args=["--no-sandbox", "--disable-dev-shm-usage"])
+        context = browser.new_context(accept_downloads=True)
+        page = context.new_page()
+        try:
+            for country, result in results.items():
+                try:
+                    _extract_report(context, page, country, result, days_back, out_dir, inspect)
+                except Exception as exc:  # noqa: BLE001
+                    result.error += f"Reporte Web: {str(exc)[:150]}"
+                    log.warning("[%s] Reporte Web falló: %s", country, exc)
+
+                apagadas_pais = (apagadas or {}).get(country, [])
+                try:
+                    result.monitor_total, result.monitor_rows = _monitor_api(
+                        country, monitor_date, monitor_date, apagadas_pais
+                    )
+                except Exception as exc:  # noqa: BLE001
+                    result.error += f" | API Monitor: {str(exc)[:120]}"
+                    log.warning("[%s] API Monitor falló: %s", country, exc)
+
+                try:
+                    _monitor_pdf(page, country, result, out_dir, inspect)
+                except Exception as exc:  # noqa: BLE001
+                    result.error += f" | PDF Monitor: {str(exc)[:100]}"
+                    log.warning("[%s] PDF Monitor falló: %s", country, exc)
+        finally:
+            browser.close()
+    return results
+
+
+def _fill_mock(results, out_dir):
+    os.makedirs(out_dir, exist_ok=True)
+    for country, result in results.items():
+        meta = config.COUNTRIES[country]
+        for label, attr in (("Reporte Web", "report_pdf"), ("Monitor", "monitor_pdf")):
+            path = os.path.join(out_dir, f"{label} {meta['name']}.pdf")
+            with open(path, "wb") as fh:
+                fh.write(b"%PDF-1.4\n% mock\n")
+            setattr(result, attr, path)
+        result.report_total = 0
+        result.monitor_total = 0
+
+
+if __name__ == "__main__":
+    logging.basicConfig(level=logging.INFO)
+    import tempfile
+
+    with tempfile.TemporaryDirectory() as tmp:
+        res = extract_all(5, tmp, mock=True)
+        assert set(res) == {"VE", "SV", "GT"}
+        assert all(r.report_pdf and r.monitor_pdf for r in res.values())
+    print("web_extractor OK")
