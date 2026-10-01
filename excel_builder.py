@@ -22,6 +22,7 @@ import os
 
 from openpyxl import Workbook
 from openpyxl.styles import Alignment
+from openpyxl.utils import get_column_letter
 from openpyxl.worksheet.datavalidation import DataValidation
 
 import config
@@ -50,18 +51,27 @@ def _apply_widths(ws, widths):
         ws.column_dimensions[col].width = width
 
 
-def _add_dropdown(ws, options, col_letter, start_row, end_row):
-    """Agrega la lista desplegable de Observaciones."""
-    options = [o for o in options if not o.endswith(",")]
-    if len(options) > 255:
-        options = [o[:255] for o in options]
-    formula = '"' + ",".join(options[:50]) + '"'
-    dv = DataValidation(type="list", formula1=formula, allow_blank=True, showErrorMessage=True)
+def _add_dropdown(ws, options, col_letter, start_row, end_row, list_col=None):
+    """Agrega la lista desplegable de Observaciones.
+
+    La lista inline tiene un límite de 255 caracteres, así que las opciones se
+    guardan en una hoja oculta "Listas" y la validación apunta a ese rango.
+    """
+    options = [o.rstrip(",") for o in options if o]
+    list_sheet = ws.parent["Listas"] if "Listas" in ws.parent.sheetnames else None
+    if list_sheet is None:
+        list_sheet = ws.parent.create_sheet("Listas")
+        list_sheet.sheet_state = "hidden"
+    col_idx = list_sheet.max_column + 1
+    col_letter_ref = get_column_letter(col_idx)
+    for i, opt in enumerate(options, start=1):
+        list_sheet.cell(row=i, column=col_idx, value=opt)
+    list_sheet.column_dimensions[col_letter_ref].hidden = True
+    ref = f"Listas!${col_letter_ref}$1:${col_letter_ref}${len(options)}"
+    dv = DataValidation(type="list", formula1=ref, allow_blank=True, showErrorMessage=True)
     ws.add_data_validation(dv)
-    if end_row > start_row:
-        dv.add(f"{col_letter}{start_row}:{col_letter}{end_row}")
-    else:
-        dv.add(f"{col_letter}{start_row}")
+    last = max(end_row, start_row)
+    dv.add(f"{col_letter}{start_row}:{col_letter}{last}")
 
 
 def _section(ws, start_row, titulo, headers, data_rows, rows_of_data=2):
@@ -84,12 +94,10 @@ def _section(ws, start_row, titulo, headers, data_rows, rows_of_data=2):
 # Por país
 # ---------------------------------------------------------------------------
 def _sheet_guatemala(ws, rows):
-    by_origen = {}
-    for r in rows:
-        by_origen.setdefault(r["Origen"], []).append(r)
-
     def take(origen):
-        return by_origen.get(origen, [])
+        # Coincidencia por prefijo: los orígenes por tienda llevan sufijo
+        # (ej. "MA_PAGOS pendiente tienda 5").
+        return [r for r in rows if r["Origen"].startswith(origen)]
 
     # Bloque Cabtra (A/B) con desplegable en B
     ws["A1"] = "StellarDocID"
@@ -181,6 +189,7 @@ def build_workbook(rows_by_country, out_dir, date_str):
         ws = wb.create_sheet(meta["sheet"])
         builders[country](ws, rows_by_country.get(country, []))
     path = os.path.join(out_dir, f"Detalles de Tr's atrapadas {date_str}.xlsx")
+    wb.active = 0  # la primera pestaña de datos queda activa
     wb.save(path)
     log.info("Hoja de cálculo generada: %s", path)
     return path
@@ -201,7 +210,9 @@ if __name__ == "__main__":
         from openpyxl import load_workbook
 
         wb = load_workbook(out)
-        assert wb.sheetnames == ["Guatemala", "Salvador", "Venezuela"], wb.sheetnames
+        data_sheets = [s for s in wb.sheetnames if s != "Listas"]
+        assert data_sheets == ["Guatemala", "Salvador", "Venezuela"], wb.sheetnames
+        assert "Listas" in wb.sheetnames and wb["Listas"].sheet_state == "hidden"
         g = wb["Guatemala"]
         assert g["A1"].value == "StellarDocID" and g["B1"].value == "Observaciones"
         assert g["B2"].value == "Sin observaciones."

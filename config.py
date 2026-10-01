@@ -120,7 +120,7 @@ COUNTRIES = {
         "sheet": "Guatemala",
         "report_server": "EPAGT Guatemala",
         "monitor_path": "/gt",
-        "stellar_stores": {str(i): f"stellardb.t{i}.gt.epa.com" for i in range(2, 8)},
+        "stellar_stores": {str(i): f"stellardb.t{i}.gt.epa.com" for i in range(2, 7)},
         "has_store_pagination": True,
     },
 }

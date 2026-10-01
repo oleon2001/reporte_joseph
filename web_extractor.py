@@ -166,7 +166,12 @@ def _extract_report(context, page, country, result, days_back, out_dir, inspect)
 # Monitor
 # ---------------------------------------------------------------------------
 def _monitor_api(country, from_date, to_date, apagadas):
-    """Conteo del Monitor vía API REST. Devuelve (total_diferencias, filas)."""
+    """Conteo del Monitor vía API REST. Devuelve (total_diferencias, filas).
+
+    El Monitor compara por tienda las fuentes POS/CRPOS (caja) contra
+    CR400 / Legacy (AS400 Central) / Ventas. La diferencia es POS vs esas
+    fuentes; se reporta la mayor discrepancia por tienda.
+    """
     import requests
 
     base = config.MONITOR_API_URL
@@ -191,25 +196,44 @@ def _monitor_api(country, from_date, to_date, apagadas):
             flat += item if isinstance(item, list) else [item]
         return {str(x.get("store")): _to_int(x.get("count")) for x in flat if x.get("store")}
 
-    stellar = counts("transaction-stellar-front-count")
+    # Fuentes del Monitor. En SV la caja es CRPOS (db2); en VE/GT es Stellar.
+    if country == "SV":
+        pos_ep = "transaction-crpos-front-count"
+    else:
+        pos_ep = "transaction-stellar-front-count"
+    pos = counts(pos_ep)
+    cr400 = counts("transaction-cr400-front-count")
+    legacy = counts("transaction-AS400-central-count")
     ventas = counts("transaction-ventas-front-count")
+    pos_central = counts("transaction-stellar-central-count")
 
     apagadas = set(apagadas or [])
+    stores = set(pos) | set(legacy) | set(ventas)
     rows, total = [], 0
-    for store in sorted(set(stellar) | set(ventas), key=lambda s: int(s) if s.isdigit() else s):
+    for store in sorted(stores, key=lambda s: int(s) if s.isdigit() else s):
         if store in apagadas:
             continue
-        diff = abs(stellar.get(store, 0) - ventas.get(store, 0))
+        # Compara la caja (POS) contra las fuentes de destino.
+        fuentes = [legacy.get(store, 0), ventas.get(store, 0)]
+        if country == "SV":
+            fuentes.append(cr400.get(store, 0))
+        base = pos.get(store, 0)
+        diff = max(abs(base - f) for f in fuentes)
         total += diff
-        rows.append({"tienda": store, "diff": diff,
-                     "stellar": stellar.get(store, 0), "ventas": ventas.get(store, 0)})
+        rows.append({
+            "tienda": store, "diff": diff, "pos": base,
+            "legacy": legacy.get(store, 0), "ventas": ventas.get(store, 0),
+            "cr400": cr400.get(store, 0), "stellar_central": pos_central.get(store, 0),
+        })
     return total, rows
 
 
 def _monitor_pdf(page, country, result, out_dir, inspect):
     meta = config.COUNTRIES[country]
     sel = config.SELECTORS
-    today = datetime.date.today().strftime(config.MONITOR_DATE_FORMAT)
+    today = datetime.date.today()
+    date_from = (today - datetime.timedelta(days=1)).strftime(config.MONITOR_DATE_FORMAT)
+    date_to = today.strftime(config.MONITOR_DATE_FORMAT)
 
     page.goto(config.MONITOR_BASE_URL + meta["monitor_path"],
               wait_until="domcontentloaded", timeout=60000)
@@ -217,8 +241,8 @@ def _monitor_pdf(page, country, result, out_dir, inspect):
 
     dates = page.locator(sel["monitor_date_from"])
     if dates.count() >= 2:
-        dates.nth(0).fill(today)
-        dates.nth(1).fill(today)
+        dates.nth(0).fill(date_from)
+        dates.nth(1).fill(date_to)
     if page.locator(sel["monitor_refresh"]).count():
         page.locator(sel["monitor_refresh"]).first.click()
         page.wait_for_timeout(5000)
@@ -268,31 +292,40 @@ def extract_all(days_back, out_dir, mock=False, inspect=False, apagadas=None, on
     from playwright.sync_api import sync_playwright
 
     today = datetime.date.today()
-    monitor_date = today.isoformat()  # el Monitor solo usa el día actual
+    # El Monitor cubre ayer y hoy (si no, faltan transacciones del día anterior).
+    monitor_from = (today - datetime.timedelta(days=1)).isoformat()
+    monitor_to = today.isoformat()
 
     with sync_playwright() as p:
+        log.info("Iniciando navegador Playwright (Chromium headless)...")
         browser = p.chromium.launch(headless=True, args=["--no-sandbox", "--disable-dev-shm-usage"])
         context = browser.new_context(accept_downloads=True)
         page = context.new_page()
         try:
             for country, result in results.items():
+                log.info("[%s] 1/3 Extrayendo Reporte Web (BIRT)...", country)
                 try:
                     _extract_report(context, page, country, result, days_back, out_dir, inspect)
+                    log.info("[%s] Reporte Web OK (total: %s, filas: %s)", country, result.report_total, len(result.report_rows))
                 except Exception as exc:  # noqa: BLE001
                     result.error += f"Reporte Web: {str(exc)[:150]}"
                     log.warning("[%s] Reporte Web falló: %s", country, exc)
 
+                log.info("[%s] 2/3 Consultando API del Monitor...", country)
                 apagadas_pais = (apagadas or {}).get(country, [])
                 try:
                     result.monitor_total, result.monitor_rows = _monitor_api(
-                        country, monitor_date, monitor_date, apagadas_pais
+                        country, monitor_from, monitor_to, apagadas_pais
                     )
+                    log.info("[%s] API Monitor OK (diferencias: %s)", country, result.monitor_total)
                 except Exception as exc:  # noqa: BLE001
                     result.error += f" | API Monitor: {str(exc)[:120]}"
                     log.warning("[%s] API Monitor falló: %s", country, exc)
 
+                log.info("[%s] 3/3 Generando PDF del Monitor...", country)
                 try:
                     _monitor_pdf(page, country, result, out_dir, inspect)
+                    log.info("[%s] PDF Monitor OK", country)
                 except Exception as exc:  # noqa: BLE001
                     result.error += f" | PDF Monitor: {str(exc)[:100]}"
                     log.warning("[%s] PDF Monitor falló: %s", country, exc)

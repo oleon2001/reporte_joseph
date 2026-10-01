@@ -162,9 +162,9 @@ def connect_mssql(cfg, database="master"):
     cs = (
         f"DRIVER={config.SQL_SERVER_DRIVER};SERVER={cfg['host']},1433;"
         f"DATABASE={database};UID={cfg['user']};PWD={cfg['pass']};"
-        "TrustServerCertificate=yes;Connection Timeout=15;"
+        "TrustServerCertificate=yes;Connection Timeout=6;"
     )
-    return pyodbc.connect(cs, timeout=15)
+    return pyodbc.connect(cs, timeout=6)
 
 
 def connect_db2(cfg):
@@ -186,10 +186,12 @@ def connect_db2(cfg):
 # ---------------------------------------------------------------------------
 def _run(name, country, fn):
     result = SourceResult(name, country)
+    log.info("[%s] Consultando BD: %s...", country, name)
     try:
         rows = fn()
         result.rows = rows or []
         result.ok = True
+        log.info("[%s] BD '%s' OK (%d registros)", country, name, len(result.rows))
     except Exception as exc:  # noqa: BLE001 - queremos aislar cualquier fallo de fuente
         result.error = str(exc)[:200]
         log.warning("Fuente '%s' (%s) no disponible: %s", name, country, result.error)
@@ -211,28 +213,37 @@ def _central_stellar_query(cfg, sql_file, days_back, origen, database="VENTASSTO
 
 
 def _ma_pagos_stores(stores, days_back, origen):
-    """Pendientes por imprimir desde el Stellar de cada tienda."""
+    """Pendientes por imprimir desde el Stellar de cada tienda (en paralelo)."""
+    from concurrent.futures import ThreadPoolExecutor
+
     sql = read_sql("MA_PAGOS_pendientes.sql")
     if not sql:
         raise RuntimeError("SQL no configurado: MA_PAGOS_pendientes.sql")
-    store_cfg = {"host": None, "user": config.STELLAR_STORE_USER, "pass": config.STELLAR_STORE_PASS}
-    collected, errors, ok_stores = [], [], 0
-    for store_id, host in stores.items():
-        store_cfg["host"] = host
+
+    def query_store(store_id, host):
+        store_cfg = {"host": host, "user": config.STELLAR_STORE_USER,
+                     "pass": config.STELLAR_STORE_PASS}
+        conn = connect_mssql(store_cfg, database="master")
         try:
-            conn = connect_mssql(store_cfg, database="master")
+            return store_id, _fetch(conn, sql)
+        finally:
+            conn.close()
+
+    collected, errors, ok_stores = [], [], 0
+    with ThreadPoolExecutor(max_workers=len(stores) or 1) as pool:
+        futures = {pool.submit(query_store, sid, host): sid for sid, host in stores.items()}
+        for future in futures:
+            store_id = futures[future]
             try:
-                rows = _fetch(conn, sql)
-            finally:
-                conn.close()
-            ok_stores += 1
-            for r in rows:
-                row = normalize(r, f"{origen} tienda {store_id}", country="GT")
-                if not row["Tienda"]:
-                    row["Tienda"] = store_id
-                collected.append(row)
-        except Exception as exc:  # noqa: BLE001
-            errors.append(f"t{store_id}:{str(exc)[:60]}")
+                sid, rows = future.result()
+                ok_stores += 1
+                for r in rows:
+                    row = normalize(r, f"{origen} tienda {sid}", country="GT")
+                    if not row["Tienda"]:
+                        row["Tienda"] = sid
+                    collected.append(row)
+            except Exception as exc:  # noqa: BLE001
+                errors.append(f"t{store_id}:{str(exc)[:60]}")
     # Solo se considera fuente no disponible si NINGUNA tienda respondió.
     if ok_stores == 0 and errors:
         raise RuntimeError("; ".join(errors[:3]))

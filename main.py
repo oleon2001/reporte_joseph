@@ -211,10 +211,12 @@ def main():
         merge_results(args.merge, web, db_results, attachments)
 
     # 3) Hoja de cálculo (con todos los países combinados)
+    log.info("Generando libro Excel consolidado...")
     rows_by_country = db_validator.flatten_rows(db_results)
     for country in config.COUNTRIES:
         rows_by_country.setdefault(country, [])
     excel_path = excel_builder.build_workbook(rows_by_country, out_dir, date_str)
+    log.info("Excel generado correctamente: %s", excel_path)
 
     # 4) Métricas + cuerpo
     metrics = {c: metrics_for(c, web, db_results) for c in config.COUNTRIES}
@@ -244,14 +246,19 @@ def main():
             print(f"  ! {e}")
     print("=" * 70)
 
-    # Entregables por versión (documentos + mensaje + destinatarios)
-    version = entregables.next_version()
-    dest = args.test_recipient or config.RECIPIENTS
-    root = entregables.build_deliverable(
-        version, date_str, web, db_results, metrics, subject, body, dest, files, errors,
-        mock=args.mock,
-    )
-    print(f"ENTREGABLE: {root}")
+    # Entregables por versión (documentos + mensaje + destinatarios).
+    # En modo --mock NO se genera entregable numerado: no es enviable y solo
+    # confunde. Se genera únicamente si se pide --inspect (para depurar).
+    if args.mock and not args.inspect:
+        log.info("MODO MOCK: no se crea entregable (usa --inspect si necesitas volcarlo).")
+    else:
+        version = entregables.next_version()
+        dest = args.test_recipient or config.RECIPIENTS
+        root = entregables.build_deliverable(
+            version, date_str, web, db_results, metrics, subject, body, dest, files, errors,
+            mock=args.mock,
+        )
+        print(f"ENTREGABLE: {root}")
 
     if args.export:
         export_results(args.export, web, db_results, files)

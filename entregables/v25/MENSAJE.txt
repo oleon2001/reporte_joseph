@@ -1,0 +1,14 @@
+Asunto: Reporte de transacciones atrapadas EPA 28-09-2026
+
+============================================================
+Buenos días, adjunto los reportes de transacciones atrapadas y diferencias de las tiendas de Ferretería EPA hasta el día 28 de septiembre de 2026, los reportes presentan:
+
+VE: 0 en el Reporte Web y 0 en el Monitor.
+SV: 3 en el Reporte Web y 264 en el Monitor.
+GT: 1 en el Reporte Web, 3 en el Monitor, 1 diferencias entre Legacy y Stellar y 2 pendientes por imprimir.
+
+Observaciones:
+• Detalles adjuntos en la hoja de cálculo.
+• Algunas de las diferencias detectadas en SV por parte del Monitor es debido a que aún no han encendido todas las cajas, por ende, si se detectó diferencias en el Reporte Web, es probable que provenga de las mismas.
+
+Saludos cordiales.

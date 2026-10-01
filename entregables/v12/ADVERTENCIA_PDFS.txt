@@ -1,7 +1,0 @@
-ATENCIÓN: los siguientes PDFs no tienen contenido válido (posible corrida --mock o fallo de red):
-  - Reporte Web Venezuela.pdf (16 bytes)
-  - Reporte Web El Salvador.pdf (16 bytes)
-  - Reporte Web Guatemala.pdf (16 bytes)
-  - Monitor Venezuela.pdf (16 bytes)
-  - Monitor El Salvador.pdf (16 bytes)
-  - Monitor Guatemala.pdf (16 bytes)
